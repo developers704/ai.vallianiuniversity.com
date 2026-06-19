@@ -38,9 +38,14 @@ export function sanitizeAnswer(answer: string): string {
 
 export function enforceGroundedResponse(
   result: ChatGenerationResult,
-  hasContext: boolean
+  hasContext: boolean,
+  options?: { policyQuestion?: boolean; message?: string }
 ): ChatGenerationResult {
-  if (!hasContext && result.confidence > 0.6) {
+  if (
+    !hasContext &&
+    result.confidence > 0.6 &&
+    !(options?.message && isSocialMessage(options.message))
+  ) {
     return {
       answer:
         "I don't have that confirmed information yet, but I can connect you with our team.",
@@ -50,6 +55,15 @@ export function enforceGroundedResponse(
   }
 
   if (result.confidence < CONFIDENCE_THRESHOLD) {
+    // Trust RAG-backed policy answers even when the model reports low confidence
+    if (options?.policyQuestion && hasContext) {
+      return {
+        ...result,
+        answer: sanitizeAnswer(result.answer),
+        requiresHuman: false,
+      };
+    }
+
     return {
       ...result,
       requiresHuman: true,

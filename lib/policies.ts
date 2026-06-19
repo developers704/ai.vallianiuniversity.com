@@ -55,10 +55,24 @@ export function getPoliciesByIntent(intent: ChatIntent): PolicyDocument[] {
   return policies.filter((p) => p.types.some((t) => types.includes(t)));
 }
 
+const FINANCING_MESSAGE_PATTERN =
+  /\b(financ(e|ing)?|acima|affirm|authorize\.?net|pay\s*over\s*time|buy\s*now\s*pay\s*later|bnpl|monthly\s*payment|payment\s*plan)\b/i;
+
+const STORE_LOCATION_MESSAGE_PATTERN =
+  /\b(where\s*are\s*(you|your|from|located|based)|where\s*are\s*from|where\s*(is|are)\s*(your|the)?\s*(store|stores|location|locations|shop|office|headquarters|hq)|stores?|locations?|address|near\s*me|mall|find\s*a\s*store|store\s*locator)\b/i;
+
+function tokenizeMessage(message: string): string[] {
+  return message
+    .toLowerCase()
+    .replace(/[^\w\s]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 2);
+}
+
 export function searchPoliciesByMessage(message: string): PolicyDocument[] {
   const policies = loadPoliciesFromFile();
   const lower = message.toLowerCase();
-  const words = lower.split(/\s+/).filter((w) => w.length > 2);
+  const words = tokenizeMessage(message);
 
   const scored = policies.map((policy) => {
     const text = `${policy.title} ${policy.content}`.toLowerCase();
@@ -71,10 +85,10 @@ export function searchPoliciesByMessage(message: string): PolicyDocument[] {
     if (/\bship(ping)?\b/i.test(lower) && policy.types.includes("SHIPPING")) score += 10;
     if (/\breturn|exchange\b/i.test(lower) && policy.types.includes("RETURNS")) score += 10;
     if (/\brefund\b/i.test(lower) && policy.types.includes("REFUNDS")) score += 10;
-    if (/\bstore|location|address|near me|mall\b/i.test(lower) && policy.types.includes("STORE_INFO")) {
-      score += 10;
+    if (STORE_LOCATION_MESSAGE_PATTERN.test(lower) && policy.types.includes("STORE_INFO")) {
+      score += 20;
     }
-    if (/\bfinanc|acima|affirm|authorize|pay\s*over\s*time|monthly\s*payment|bnpl\b/i.test(lower) && policy.types.includes("FINANCING")) {
+    if (FINANCING_MESSAGE_PATTERN.test(lower) && policy.types.includes("FINANCING")) {
       score += 15;
     }
 
@@ -113,23 +127,66 @@ export function getHardcodedPolicyContext(
   message: string,
   intent: ChatIntent
 ): string {
-  let policies = getPoliciesByIntent(intent);
+  return getRelevantPolicyContext(message, intent);
+}
 
-  if (policies.length === 0 || intent === "STORE_INFO" || intent === "GENERAL_FAQ") {
-    const byMessage = searchPoliciesByMessage(message);
-    if (byMessage.length > 0) {
-      const ids = new Set(policies.map((p) => p.id));
-      for (const p of byMessage) {
-        if (!ids.has(p.id)) policies.push(p);
-      }
+const POLICY_KEYWORD_PATTERN =
+  /\b(policy|policies|shipping|delivery|return|refund|exchange|store|location|address|warranty|financ|acima|affirm|authorize|payment\s*plan|pay\s*over\s*time|where|mall|hours|deliver|ship|freight)\b/i;
+
+/** Whether the message likely needs policy/FAQ context for RAG. */
+export function isPolicyRelatedMessage(message: string, intent?: ChatIntent): boolean {
+  const policyIntents: ChatIntent[] = [
+    "SHIPPING_POLICY",
+    "RETURNS_POLICY",
+    "REFUND_POLICY",
+    "WARRANTY",
+    "STORE_INFO",
+    "GENERAL_FAQ",
+  ];
+  if (intent && policyIntents.includes(intent)) return true;
+  if (resolvePolicyIntentFromMessage(message)) return true;
+  return POLICY_KEYWORD_PATTERN.test(message);
+}
+
+/** Focused policy context for RAG — top-ranked docs only, not the full policy dump. */
+export function getRelevantPolicyContext(message: string, intent: ChatIntent): string {
+  const resolved = resolvePolicyIntentFromMessage(message);
+  const effectiveIntent = resolved ?? intent;
+  const isStoreQuestion =
+    effectiveIntent === "STORE_INFO" || STORE_LOCATION_MESSAGE_PATTERN.test(message);
+
+  if (isStoreQuestion) {
+    const policies = getPoliciesByIntent("STORE_INFO");
+    if (policies.length === 0) return "";
+
+    const storePolicy = policies[0];
+    const words = tokenizeMessage(message);
+    const blocks = storePolicy.content.split("\n\n").filter((b) => b.trim());
+    const matching = blocks.filter((block) => {
+      const blockLower = block.toLowerCase();
+      return words.some((word) => word.length > 3 && blockLower.includes(word));
+    });
+
+    if (matching.length > 0 && matching.length < blocks.length) {
+      return formatPoliciesForContext([{ ...storePolicy, content: matching.join("\n\n") }]);
+    }
+
+    return formatPoliciesForContext([storePolicy]);
+  }
+
+  const ranked = searchPoliciesByMessage(message);
+  if (ranked.length > 0) {
+    return formatPoliciesForContext(ranked.slice(0, 2));
+  }
+
+  if (effectiveIntent !== "GENERAL_FAQ" && effectiveIntent !== "UNKNOWN") {
+    const byIntent = getPoliciesByIntent(effectiveIntent);
+    if (byIntent.length > 0) {
+      return formatPoliciesForContext(byIntent.slice(0, 2));
     }
   }
 
-  if (intent === "STORE_INFO" && policies.length === 0) {
-    policies = getPoliciesByIntent("STORE_INFO");
-  }
-
-  return formatPoliciesForContext(policies);
+  return "";
 }
 
 export function resolvePolicyIntentFromMessage(message: string): ChatIntent | null {
@@ -141,10 +198,10 @@ export function resolvePolicyIntentFromMessage(message: string): ChatIntent | nu
     return "RETURNS_POLICY";
   }
   if (/\b(ship(ping)?|delivery|deliver|freight)\b/i.test(lower)) return "SHIPPING_POLICY";
-  if (/\b(stores?|locations?|address|near me|mall|where\s*are\s*(you|your))\b/i.test(lower)) {
+  if (STORE_LOCATION_MESSAGE_PATTERN.test(lower)) {
     return "STORE_INFO";
   }
-  if (/\b(financ(e|ing)|acima|affirm|authorize\.?net|pay\s*over\s*time|buy\s*now\s*pay\s*later|bnpl|monthly\s*payment|payment\s*plan)\b/i.test(lower)) {
+  if (FINANCING_MESSAGE_PATTERN.test(lower)) {
     return "GENERAL_FAQ";
   }
   if (/\b(warranty|guarantee|repair)\b/i.test(lower)) return "WARRANTY";
@@ -191,6 +248,43 @@ function wantsFullPolicyDetails(message: string): boolean {
   );
 }
 
+const INTENT_POLICY_TYPE: Partial<Record<ChatIntent, string>> = {
+  SHIPPING_POLICY: "SHIPPING",
+  RETURNS_POLICY: "RETURNS",
+  REFUND_POLICY: "REFUNDS",
+  STORE_INFO: "STORE_INFO",
+  WARRANTY: "WARRANTY",
+};
+
+function selectPolicyForAnswer(
+  policies: PolicyDocument[],
+  message: string,
+  resolvedIntent: ChatIntent
+): PolicyDocument {
+  if (policies.length === 0) {
+    throw new Error("selectPolicyForAnswer requires at least one policy");
+  }
+  if (policies.length === 1) return policies[0];
+
+  const ranked = searchPoliciesByMessage(message).filter((candidate) =>
+    policies.some((policy) => policy.id === candidate.id)
+  );
+  if (ranked.length > 0) return ranked[0];
+
+  const intentType = INTENT_POLICY_TYPE[resolvedIntent];
+  if (intentType) {
+    const match = policies.find((policy) => policy.types.includes(intentType));
+    if (match) return match;
+  }
+
+  if (FINANCING_MESSAGE_PATTERN.test(message)) {
+    const match = policies.find((policy) => policy.types.includes("FINANCING"));
+    if (match) return match;
+  }
+
+  return policies[0];
+}
+
 function summarizePolicy(policy: PolicyDocument, message: string): string {
   if (wantsFullPolicyDetails(message)) {
     const revised = policy.lastRevised ? ` (Last Revised: ${policy.lastRevised})` : "";
@@ -224,7 +318,7 @@ export function buildPolicyDirectAnswer(
     "PRODUCT_DETAILS",
   ];
   const policyKeywords =
-    /\b(policy|policies|shipping|delivery|return|refund|exchange|store|location|address|warranty|hours|deliver|ship|freight|mall|financ|acima|affirm|authorize|payment\s*plan|pay\s*over\s*time)\b/i;
+    POLICY_KEYWORD_PATTERN;
 
   if (productIntents.includes(intent) && !policyKeywords.test(message)) {
     return null;
@@ -239,40 +333,32 @@ export function buildPolicyDirectAnswer(
     return null;
   }
 
-  let policies = policyIntent ? getPoliciesByIntent(policyIntent) : [];
-  const byMessage = searchPoliciesByMessage(message);
+  const resolvedIntent = policyIntent ?? resolvedFromMessage ?? intent;
+  const isStoreQuestion =
+    resolvedIntent === "STORE_INFO" || STORE_LOCATION_MESSAGE_PATTERN.test(message);
 
-  if (byMessage.length > 0) {
-    if (policies.length === 0) {
-      policies = byMessage;
-    } else {
-      const ids = new Set(policies.map((p) => p.id));
-      for (const p of byMessage) {
-        if (!ids.has(p.id)) policies.push(p);
-      }
-    }
+  let policies: PolicyDocument[] = [];
+  if (isStoreQuestion) {
+    policies = getPoliciesByIntent("STORE_INFO");
+  } else if (policyIntent && policyIntent !== "GENERAL_FAQ") {
+    policies = getPoliciesByIntent(policyIntent);
+  } else {
+    const byMessage = searchPoliciesByMessage(message);
+    policies =
+      byMessage.length > 0
+        ? byMessage
+        : policyIntent
+          ? getPoliciesByIntent(policyIntent)
+          : [];
   }
 
   if (policies.length === 0) return null;
 
-  const resolvedIntent = policyIntent ?? resolvedFromMessage ?? intent;
-
-  if (
-    resolvedIntent === "STORE_INFO" ||
-    (/\b(store|location|address|near|mall|where)\b/i.test(message) &&
-      policies.some((p) => p.types.includes("STORE_INFO")))
-  ) {
+  if (isStoreQuestion) {
     return formatStorePolicyAnswer(policies, message);
   }
 
-  const policy =
-    policies.find((p) => {
-      if (resolvedIntent === "SHIPPING_POLICY") return p.types.includes("SHIPPING");
-      if (resolvedIntent === "RETURNS_POLICY") return p.types.includes("RETURNS");
-      if (resolvedIntent === "REFUND_POLICY") return p.types.includes("REFUNDS");
-      return true;
-    }) ?? policies[0];
-
+  const policy = selectPolicyForAnswer(policies, message, resolvedIntent);
   return summarizePolicy(policy, message);
 }
 
@@ -280,7 +366,10 @@ function formatStorePolicyAnswer(
   policies: PolicyDocument[],
   message: string
 ): string {
-  const storePolicy = policies.find((p) => p.types.includes("STORE_INFO")) ?? policies[0];
+  const storePolicy =
+    policies.find((p) => p.types.includes("STORE_INFO")) ??
+    getPoliciesByIntent("STORE_INFO")[0] ??
+    policies[0];
   const lower = message.toLowerCase();
 
   const blocks = storePolicy.content.split("\n\n").filter((b) => b.trim());

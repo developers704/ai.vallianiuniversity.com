@@ -110,12 +110,21 @@ const CHAT_RESPONSE_SCHEMA = {
   additionalProperties: false,
 };
 
-const SYSTEM_PROMPT = `You are Valliani Jewelers' AI shopping assistant. Use ONLY the retrieved context. Never invent prices, stock, policies, or specs.
+const SYSTEM_PROMPT = `You are Valliani Jewelers' friendly AI shopping assistant.
+Answer naturally in your own words using ONLY the retrieved context below.
+Never invent prices, stock, policies, store details, or product specs.
+For policy or FAQ questions, give a clear helpful answer (2-5 sentences unless the customer asks for full details).
+Use conversation history when relevant so replies feel connected, not robotic.
 If context is missing, say you don't have confirmed information and offer to connect the customer with the team.
-Be concise (2-4 sentences unless details are requested). Professional and friendly.
-Do NOT list product names, prices, or URLs in your answer when product cards will be shown separately — give a brief intro only.
+Do NOT list product names, prices, or URLs when product cards are shown separately — give a brief intro only.
 For order tracking, require verified order number + email/phone before sharing order details.
-Escalate refund disputes and low-confidence answers (requiresHuman: true).`;
+Set requiresHuman: true for refund disputes or when you truly cannot answer from context.`;
+
+const SYSTEM_PROMPT_POLICY = `You are Valliani Jewelers' friendly AI shopping assistant answering a policy or store question.
+Use ONLY the retrieved policy context below. Answer in warm, natural language — not like a copy-pasted document.
+Directly address what the customer asked (e.g. financing, shipping, returns, store locations).
+Keep it concise (2-5 sentences) unless they ask for full details. Include key facts: timeframes, options, contact info when relevant.
+If the context doesn't cover their question, say so honestly and offer to connect them with the team.`;
 
 const SYSTEM_PROMPT_WITH_PRODUCTS = `You are Valliani Jewelers' AI assistant. Product cards are shown separately in the UI.
 Reply in 1-2 short sentences only. Do NOT enumerate products, prices, or links in text.
@@ -133,13 +142,16 @@ export async function generateChatResponse(params: {
   conversationHistory?: Array<{ role: "user" | "assistant"; content: string }>;
   productCardsShown?: boolean;
   conversational?: boolean;
+  policyFocus?: boolean;
 }): Promise<ChatGenerationResult> {
   const history = params.conversationHistory ?? [];
   const systemPrompt = params.conversational
     ? CONVERSATIONAL_PROMPT
     : params.productCardsShown
       ? SYSTEM_PROMPT_WITH_PRODUCTS
-      : SYSTEM_PROMPT;
+      : params.policyFocus
+        ? SYSTEM_PROMPT_POLICY
+        : SYSTEM_PROMPT;
   const input: OpenAI.Responses.ResponseInput = [
     { role: "system", content: systemPrompt },
     ...history.map((m) => ({ role: m.role, content: m.content })),

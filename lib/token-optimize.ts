@@ -35,7 +35,10 @@ export function buildProductListAnswer(
   const lower = message.toLowerCase();
 
   let category = "options";
-  if (/bridal|engagement/i.test(lower)) category = "bridal rings";
+  if (/father'?s?\s*day|\bdad\b/i.test(lower)) category = "Father's Day gift ideas";
+  else if (/mother'?s?\s*day|\bmom\b/i.test(lower)) category = "Mother's Day gift ideas";
+  else if (/men'?s|for men|\bdad\b/i.test(lower)) category = "men's jewelry";
+  else if (/bridal|engagement/i.test(lower)) category = "bridal rings";
   else if (/ring/i.test(lower)) category = "rings";
   else if (/earring/i.test(lower)) category = "earrings";
   else if (/necklace|pendant|chain/i.test(lower)) category = "necklaces & pendants";
@@ -89,7 +92,33 @@ export function buildConversationalContext(
   return parts.join(" ");
 }
 
-/** True when the customer has not asked a real question yet (only hi/ok/thanks). */
+/** True when the assistant just asked the customer a question worth continuing via LLM. */
+export function assistantAskedQuestion(
+  history: Array<{ role: "user" | "assistant"; content: string }>
+): boolean {
+  const lastAssistant = [...history].reverse().find((m) => m.role === "assistant");
+  if (!lastAssistant) return false;
+
+  const text = lastAssistant.content.trim();
+
+  // Generic welcome/greeting — "ok" or "sure" should get a simple menu prompt, not open-ended LLM
+  if (
+    /\bwelcome to valliani\b/i.test(text) ||
+    /\bhow can i help\b/i.test(text) ||
+    /\bwhat can i help you with today\b/i.test(text)
+  ) {
+    return false;
+  }
+
+  return (
+    /\?\s*$/.test(text) ||
+    /\b(would you|do you want|shall i|can i help|let me know|which|what kind|any preference)\b/i.test(
+      text
+    )
+  );
+}
+
+/** True when the customer has asked a real question (not just hi/ok/thanks). */
 export function hasSubstantiveUserTopic(
   history: Array<{ role: "user" | "assistant"; content: string }>
 ): boolean {
@@ -102,6 +131,32 @@ export function hasSubstantiveUserTopic(
       !isFarewell(m.content) &&
       m.content.trim().length > 3
   );
+}
+
+/** True when the most recent assistant turn showed product cards. */
+export function lastAssistantShowedProducts(
+  history: Array<{ role: string; content: string; metadata?: unknown }>
+): boolean {
+  const lastAssistant = [...history].reverse().find((m) => m.role === "assistant");
+  if (!lastAssistant) return false;
+
+  const metadata = lastAssistant.metadata as { products?: unknown[] } | null | undefined;
+  if (Array.isArray(metadata?.products) && metadata.products.length > 0) {
+    return true;
+  }
+
+  return /\bproduct cards?\b/i.test(lastAssistant.content);
+}
+
+/** Reply when the customer reacts positively after seeing product recommendations. */
+export function buildProductFollowUpAnswer(message: string): string {
+  const lower = message.trim().toLowerCase().replace(/^['"`]+|['"`]+$/g, "");
+
+  if (/^(thanks?|thank\s*you|thx)/.test(lower)) {
+    return "You're welcome! Click any product card to view details on our site, or tell me if you'd like to see more options.";
+  }
+
+  return "Wonderful! Click any of the product cards above to view details and purchase on our site. I can also help narrow things down by budget, metal, or style — just let me know.";
 }
 
 /** Reliable reply when the chat just started and the user only said hi/ok/sure. */

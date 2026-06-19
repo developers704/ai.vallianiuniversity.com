@@ -9,7 +9,7 @@ export default function WidgetPreviewPage() {
       <p className="text-sm text-[#666] mb-8">
         The chat widget loads from /widget.js. Use this page to test locally.
       </p>
-      <Script src="/widget.js?v=2.3.4" strategy="afterInteractive" />
+      <Script src="/widget.js?v=2.3.5" strategy="afterInteractive" />
     </main>
   );
 }

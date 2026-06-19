@@ -9,6 +9,7 @@ import {
 } from "./shopify-storefront";
 import {
   parseSearchFilters,
+  enrichProductSearchQuery,
   scoreProductMatch,
   type ProcessedProduct,
   type ProductSearchResult,
@@ -166,6 +167,7 @@ export async function searchProductsHybrid(
   limit = 5
 ): Promise<ProductSearchResult[]> {
   const mergedFilters = { ...parseSearchFilters(query), ...filters };
+  const searchQuery = enrichProductSearchQuery(query, mergedFilters);
 
   if (mergedFilters.sku) {
     const bySku = await findProductBySkuAsync(mergedFilters.sku);
@@ -177,14 +179,14 @@ export async function searchProductsHybrid(
     return localResults;
   }
 
-  const shopifyLive = await searchProductsShopifyLive(query, limit);
+  const shopifyLive = await searchProductsShopifyLive(searchQuery, limit);
   if (shopifyLive.length > 0) {
     const merged = mergeProductResults(localResults, shopifyLive, limit);
     if (merged.length > 0) return merged;
   }
 
   try {
-    const embedding = await createEmbedding(query);
+    const embedding = await createEmbedding(searchQuery);
     const vectorResults = await searchProductsByVector(
       embedding,
       limit * 2,
@@ -206,7 +208,14 @@ export async function searchProductsHybrid(
           }
           return true;
         })
-        .slice(0, limit);
+        .map((p) => ({
+          product: p,
+          score: scoreProductMatch(p, query, mergedFilters),
+        }))
+        .filter(({ score }) => score > 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, limit)
+        .map(({ product }) => product);
 
       if (filtered.length > 0) return filtered;
     }

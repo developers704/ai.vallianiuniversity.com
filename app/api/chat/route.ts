@@ -3,6 +3,8 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import {
   classifyIntent,
+  buildCasualSmallTalkAnswer,
+  isCasualSmallTalk,
   isConversationalAcknowledgment,
   isFarewell,
   isGreeting,
@@ -34,11 +36,13 @@ import {
   buildProductListAnswer,
   buildConversationalContext,
   buildEarlyConversationAnswer,
-  hasSubstantiveUserTopic,
+  buildProductFollowUpAnswer,
+  assistantAskedQuestion,
+  lastAssistantShowedProducts,
   shouldUseProductListTemplate,
   trimConversationHistory,
 } from "@/lib/token-optimize";
-import { buildPolicyDirectAnswer } from "@/lib/policies";
+import { buildPolicyDirectAnswer, isPolicyRelatedMessage } from "@/lib/policies";
 
 export const runtime = "nodejs";
 
@@ -183,6 +187,31 @@ export async function POST(request: Request) {
       );
     }
 
+    if (isCasualSmallTalk(message)) {
+      const answer = buildCasualSmallTalkAnswer(message);
+
+      await prisma.chatMessage.create({
+        data: {
+          sessionId,
+          role: "assistant",
+          content: answer,
+          intent: "GENERAL_FAQ",
+          metadata: { products: [], requiresHuman: false } as unknown as Prisma.InputJsonValue,
+        },
+      });
+
+      return NextResponse.json(
+        {
+          answer,
+          intent: "GENERAL_FAQ",
+          products: [],
+          requiresHuman: false,
+          sessionId,
+        },
+        { headers: { ...headers, "X-RateLimit-Remaining": String(remaining) } }
+      );
+    }
+
     if (isConversationalAcknowledgment(message)) {
       const history = await prisma.chatMessage.findMany({
         where: { sessionId },
@@ -197,18 +226,20 @@ export async function POST(request: Request) {
         }))
       );
 
-      const answer = !hasSubstantiveUserTopic(conversationHistory)
-        ? buildEarlyConversationAnswer(message)
-        : sanitizeAnswer(
-            (
-              await generateChatResponse({
-                message,
-                context: buildConversationalContext(conversationHistory),
-                conversationHistory,
-                conversational: true,
-              })
-            ).answer
-          );
+      const answer = lastAssistantShowedProducts(history)
+        ? buildProductFollowUpAnswer(message)
+        : assistantAskedQuestion(conversationHistory)
+          ? sanitizeAnswer(
+              (
+                await generateChatResponse({
+                  message,
+                  context: buildConversationalContext(conversationHistory),
+                  conversationHistory,
+                  conversational: true,
+                })
+              ).answer
+            )
+          : buildEarlyConversationAnswer(message);
 
       await prisma.chatMessage.create({
         data: {
@@ -236,34 +267,6 @@ export async function POST(request: Request) {
       message,
       classifyIntentWithLLM
     );
-
-    const policyDirectAnswer = buildPolicyDirectAnswer(message, intent);
-    if (
-      policyDirectAnswer &&
-      intent !== "ORDER_TRACKING" &&
-      intent !== "HUMAN_SUPPORT"
-    ) {
-      await prisma.chatMessage.create({
-        data: {
-          sessionId,
-          role: "assistant",
-          content: policyDirectAnswer,
-          intent,
-          metadata: { products: [], requiresHuman: false } as unknown as Prisma.InputJsonValue,
-        },
-      });
-
-      return NextResponse.json(
-        {
-          answer: policyDirectAnswer,
-          intent,
-          products: [],
-          requiresHuman: false,
-          sessionId,
-        },
-        { headers: { ...headers, "X-RateLimit-Remaining": String(remaining) } }
-      );
-    }
 
     let orderContext = "";
     let orderVerified = false;
@@ -354,6 +357,7 @@ export async function POST(request: Request) {
 
     const products = ctx.products.map((p) => toProductCard(p));
     const useProductTemplate = shouldUseProductListTemplate(intent, products.length);
+    const policyQuestion = isPolicyRelatedMessage(message, intent);
 
     let generation: { answer: string; confidence: number; requiresHuman: boolean };
 
@@ -369,8 +373,25 @@ export async function POST(request: Request) {
         context: contextBlock,
         conversationHistory,
         productCardsShown: products.length > 0,
+        policyFocus: policyQuestion && Boolean(ctx.policyContext?.trim()),
       });
-      generation = enforceGroundedResponse(generation, hasContext);
+      generation = enforceGroundedResponse(generation, hasContext, {
+        policyQuestion,
+        message,
+      });
+
+      // Last-resort fallback only when retrieval found nothing at all
+      if (
+        policyQuestion &&
+        intent !== "ORDER_TRACKING" &&
+        intent !== "HUMAN_SUPPORT" &&
+        !ctx.policyContext?.trim()
+      ) {
+        const fallback = buildPolicyDirectAnswer(message, intent);
+        if (fallback) {
+          generation = { answer: fallback, confidence: 0.85, requiresHuman: false };
+        }
+      }
     }
 
     const requiresHuman = shouldEscalate({

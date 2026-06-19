@@ -4,7 +4,7 @@ import { searchProductsHybrid, findProductBySkuAsync } from "./product-search";
 import type { ChatIntent } from "./intent";
 import type { ProductSearchResult } from "./types/product";
 import { prisma } from "./db";
-import { getHardcodedPolicyContext } from "./policies";
+import { getRelevantPolicyContext, isPolicyRelatedMessage } from "./policies";
 import { formatCompactProductContext, truncateForContext } from "./token-optimize";
 
 export interface RetrievalContext {
@@ -71,7 +71,7 @@ export async function retrieveContext(params: {
         : formatCompactProductContext(products);
   }
 
-  if (POLICY_INTENTS.includes(intent)) {
+  if (POLICY_INTENTS.includes(intent) || isPolicyRelatedMessage(message, intent)) {
     policyContext = await retrievePolicyContext(message, intent);
   }
 
@@ -87,16 +87,18 @@ async function retrievePolicyContext(
   message: string,
   intent: ChatIntent
 ): Promise<string> {
-  const hardcoded = getHardcodedPolicyContext(message, intent);
-  if (hardcoded) return hardcoded;
-
   const typeFilter = POLICY_TYPE_MAP[intent];
 
+  // 1. Message-ranked policies from data/policies.json — most reliable for known topics
+  const fileContext = getRelevantPolicyContext(message, intent);
+
+  // 2. Vector search supplements with knowledge-base docs
+  let vectorContext = "";
   try {
     const embedding = await createEmbedding(message);
-    const vectorResults = await searchKnowledgeByVector(embedding, 3);
+    const vectorResults = await searchKnowledgeByVector(embedding, 2);
     if (vectorResults.length > 0) {
-      return vectorResults
+      vectorContext = vectorResults
         .map((d) => `[${d.type}] ${d.title}\n${d.content}`)
         .join("\n\n---\n\n");
     }
@@ -104,6 +106,13 @@ async function retrievePolicyContext(
     // fall through
   }
 
+  if (fileContext && vectorContext) {
+    return `${fileContext}\n\n---\n\n${vectorContext}`;
+  }
+  if (fileContext) return fileContext;
+  if (vectorContext) return vectorContext;
+
+  // 3. Published knowledge documents from DB
   try {
     const docs = await prisma.knowledgeDocument.findMany({
       where: {
@@ -128,7 +137,7 @@ export function buildContextBlock(ctx: RetrievalContext): string {
   const sections: string[] = [];
   if (ctx.productContext?.trim()) sections.push(`## Products\n${ctx.productContext}`);
   if (ctx.policyContext?.trim()) {
-    sections.push(`## Policies & FAQs\n${truncateForContext(ctx.policyContext)}`);
+    sections.push(`## Policies & FAQs\n${truncateForContext(ctx.policyContext, 2500)}`);
   }
   if (ctx.orderContext?.trim()) sections.push(`## Order Information\n${ctx.orderContext}`);
   return sections.join("\n\n") || "No retrieved context available.";

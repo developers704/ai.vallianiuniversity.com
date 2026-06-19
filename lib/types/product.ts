@@ -107,6 +107,7 @@ export interface SearchFilters {
   metal?: string;
   stoneType?: string;
   gender?: string;
+  occasion?: "fathers_day" | "mothers_day" | "valentine" | "gift";
   keywords?: string[];
   sku?: string;
 }
@@ -146,8 +147,30 @@ export function parseSearchFilters(message: string): SearchFilters {
     }
   }
 
-  if (/men'?s|for men\b/i.test(lower)) filters.gender = "men";
-  if (/women'?s|for women|ladies\b/i.test(lower)) filters.gender = "women";
+  if (/men'?s|for men\b|\bdad\b|\bfather\b|\bgrandpa\b|\bgrandfather\b|\bhim\b/i.test(lower)) {
+    filters.gender = "men";
+  }
+  if (/women'?s|for women|ladies|\bmom\b|\bmother\b|\bher\b/i.test(lower)) {
+    filters.gender = "women";
+  }
+
+  if (/\bfather'?s?\s*day\b|\bgift\s*for\s+dad\b|\bfor\s+my\s+dad\b/i.test(lower)) {
+    filters.gender = "men";
+    filters.occasion = "fathers_day";
+    filters.keywords = [...(filters.keywords ?? []), "gift", "men", "watch", "ring", "bracelet"];
+  }
+  if (/\bmother'?s?\s*day\b|\bgift\s*for\s+mom\b/i.test(lower)) {
+    filters.gender = "women";
+    filters.occasion = "mothers_day";
+    filters.keywords = [...(filters.keywords ?? []), "gift"];
+  }
+  if (/\bvalentine\b|\banniversary\s+gift\b/i.test(lower)) {
+    filters.occasion = "valentine";
+    filters.keywords = [...(filters.keywords ?? []), "gift"];
+  }
+  if (/\bgift\b/i.test(lower) && !filters.occasion) {
+    filters.occasion = "gift";
+  }
 
   if (/lab[- ]?grown/i.test(lower)) filters.stoneType = "lab grown";
   if (/\bdiamond\b/i.test(lower)) filters.keywords = [...(filters.keywords ?? []), "diamond"];
@@ -168,6 +191,46 @@ export function parseSearchFilters(message: string): SearchFilters {
   if (skuMatch) filters.sku = skuMatch[1].toUpperCase();
 
   return filters;
+}
+
+/** Expand vague gift/occasion queries so search and embeddings target the right catalog slice. */
+export function enrichProductSearchQuery(message: string, filters: SearchFilters): string {
+  const parts = [message];
+
+  if (filters.occasion === "fathers_day" || filters.gender === "men") {
+    parts.push("men's gift watch ring bracelet chain pendant");
+  }
+  if (filters.occasion === "mothers_day" || filters.gender === "women") {
+    parts.push("women's gift necklace earrings ring bracelet");
+  }
+  if (filters.maxPrice !== undefined) {
+    parts.push(`under ${filters.maxPrice}`);
+  }
+  if (filters.category) {
+    parts.push(filters.category);
+  }
+
+  return parts.join(" ");
+}
+
+function isLikelyMensProduct(text: string, category?: string | null): boolean {
+  const haystack = `${text} ${category ?? ""}`.toLowerCase();
+  return (
+    /\bmen'?s\b/.test(haystack) ||
+    /\bfor men\b/.test(haystack) ||
+    category?.toLowerCase().includes("men") === true
+  );
+}
+
+function isLikelyWomensProduct(text: string, category?: string | null): boolean {
+  const haystack = `${text} ${category ?? ""}`.toLowerCase();
+  return (
+    /\bwomen'?s\b/.test(haystack) ||
+    /\bladies\b/.test(haystack) ||
+    /\bbridal\b/.test(haystack) ||
+    /\bengagement\b/.test(haystack) ||
+    (/\bhoops?\b/.test(haystack) && !/\bmen'?s\b/.test(haystack))
+  );
 }
 
 export function scoreProductMatch(
@@ -207,8 +270,26 @@ export function scoreProductMatch(
   if (filters.stoneType && text.includes(filters.stoneType)) score += 4;
   if (filters.metal && text.includes(filters.metal)) score += 3;
   if (filters.vendor && text.includes(filters.vendor.toLowerCase())) score += 4;
+
+  if (filters.gender === "men" || filters.occasion === "fathers_day") {
+    if (isLikelyMensProduct(text, product.category)) score += 18;
+    if (product.category?.toLowerCase() === "watches") score += 10;
+    if (product.category?.toLowerCase().includes("men")) score += 15;
+    if (isLikelyWomensProduct(text, product.category)) score -= 25;
+    if (/\bgift\b/.test(text)) score += 4;
+  }
+
+  if (filters.gender === "women" || filters.occasion === "mothers_day") {
+    if (isLikelyWomensProduct(text, product.category)) score += 12;
+    if (isLikelyMensProduct(text, product.category)) score -= 20;
+  }
+
   if (filters.gender === "men" && /\bmen'?s|for men\b/i.test(text)) score += 3;
   if (filters.gender === "women" && /\bwomen'?s|ladies\b/i.test(text)) score += 3;
+
+  for (const keyword of filters.keywords ?? []) {
+    if (text.includes(keyword.toLowerCase())) score += 3;
+  }
 
   return score;
 }

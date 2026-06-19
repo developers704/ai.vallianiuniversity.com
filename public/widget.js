@@ -62,7 +62,7 @@
     brandName: "Valliani Jewelers",
     accent: "#c9a962",
     dark: "#1a1a1a",
-    version: "2.3.4",
+    version: "2.3.5",
   };
 
   var state = {
