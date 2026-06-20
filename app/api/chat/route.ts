@@ -34,15 +34,22 @@ import { corsHeaders, handleOptions } from "@/lib/cors";
 import { rateLimit, getClientIp } from "@/lib/rate-limit";
 import {
   buildProductListAnswer,
+  buildNoProductsAnswer,
   buildConversationalContext,
   buildEarlyConversationAnswer,
   buildProductFollowUpAnswer,
   assistantAskedQuestion,
   lastAssistantShowedProducts,
   shouldUseProductListTemplate,
+  isProductListIntent,
   trimConversationHistory,
 } from "@/lib/token-optimize";
-import { buildPolicyDirectAnswer, isPolicyRelatedMessage } from "@/lib/policies";
+import { buildPolicyDirectAnswer, isPolicyInquiry, isPolicyRelatedMessage, isActiveRefundRequest } from "@/lib/policies";
+import {
+  buildContextualProductQuery,
+  isProductSearchRefinement,
+  lastAssistantShowedProductsFromHistory,
+} from "@/lib/conversation-context";
 
 export const runtime = "nodejs";
 
@@ -268,6 +275,56 @@ export async function POST(request: Request) {
       classifyIntentWithLLM
     );
 
+    const history = await prisma.chatMessage.findMany({
+      where: { sessionId },
+      orderBy: { createdAt: "asc" },
+      take: 10,
+    });
+
+    const historyForContext = history.map((m) => ({
+      role: m.role,
+      content: m.content,
+      metadata: m.metadata,
+    }));
+
+    const searchMessage = buildContextualProductQuery(message, historyForContext);
+    const isProductRefinement =
+      isProductSearchRefinement(message) &&
+      lastAssistantShowedProductsFromHistory(historyForContext);
+    const effectiveIntent =
+      isProductRefinement &&
+      !["ORDER_TRACKING", "HUMAN_SUPPORT", "SHIPPING_POLICY", "RETURNS_POLICY", "REFUND_POLICY"].includes(
+        intent
+      )
+        ? "PRODUCT_SEARCH"
+        : intent;
+
+    if (isPolicyInquiry(message)) {
+      const policyAnswer = buildPolicyDirectAnswer(message, effectiveIntent);
+      if (policyAnswer) {
+        await prisma.chatMessage.create({
+          data: {
+            sessionId,
+            role: "assistant",
+            content: policyAnswer,
+            intent: effectiveIntent,
+            metadata: { products: [], requiresHuman: false } as unknown as Prisma.InputJsonValue,
+          },
+        });
+
+        return NextResponse.json(
+          {
+            answer: policyAnswer,
+            intent: effectiveIntent,
+            products: [],
+            requiresHuman: false,
+            sessionId,
+          },
+          { headers: { ...headers, "X-RateLimit-Remaining": String(remaining) } }
+        );
+      }
+    }
+
     let orderContext = "";
     let orderVerified = false;
 
@@ -276,7 +333,7 @@ export async function POST(request: Request) {
         return NextResponse.json(
           {
             answer: ORDER_VERIFICATION_MESSAGE,
-            intent,
+            intent: effectiveIntent,
             products: [],
             requiresHuman: false,
             sessionId,
@@ -302,7 +359,7 @@ export async function POST(request: Request) {
             return NextResponse.json(
               {
                 answer: ORDER_VERIFICATION_FAILED_MESSAGE,
-                intent,
+                intent: effectiveIntent,
                 products: [],
                 requiresHuman: true,
                 sessionId,
@@ -319,7 +376,7 @@ export async function POST(request: Request) {
         return NextResponse.json(
           {
             answer: ORDER_VERIFICATION_MESSAGE,
-            intent,
+            intent: effectiveIntent,
             products: [],
             requiresHuman: false,
             sessionId,
@@ -331,7 +388,8 @@ export async function POST(request: Request) {
 
     const ctx = await retrieveContext({
       message,
-      intent,
+      searchMessage,
+      intent: effectiveIntent,
       extractedSku,
       orderContext,
     });
@@ -342,12 +400,6 @@ export async function POST(request: Request) {
       Boolean(ctx.policyContext?.trim()) ||
       orderVerified;
 
-    const history = await prisma.chatMessage.findMany({
-      where: { sessionId },
-      orderBy: { createdAt: "asc" },
-      take: 10,
-    });
-
     const conversationHistory = trimConversationHistory(
       history.slice(0, -1).map((m) => ({
         role: m.role as "user" | "assistant",
@@ -356,14 +408,21 @@ export async function POST(request: Request) {
     );
 
     const products = ctx.products.map((p) => toProductCard(p));
-    const useProductTemplate = shouldUseProductListTemplate(intent, products.length);
-    const policyQuestion = isPolicyRelatedMessage(message, intent);
+    const useProductTemplate = shouldUseProductListTemplate(effectiveIntent, products.length);
+    const policyQuestion = isPolicyRelatedMessage(message, effectiveIntent);
+    const isProductSearch = isProductListIntent(effectiveIntent);
 
     let generation: { answer: string; confidence: number; requiresHuman: boolean };
 
-    if (useProductTemplate) {
+    if (isProductSearch && products.length === 0) {
       generation = {
-        answer: buildProductListAnswer(ctx.products, message),
+        answer: buildNoProductsAnswer(message, searchMessage),
+        confidence: 0.9,
+        requiresHuman: false,
+      };
+    } else if (useProductTemplate) {
+      generation = {
+        answer: buildProductListAnswer(ctx.products, searchMessage, isProductRefinement),
         confidence: 0.9,
         requiresHuman: false,
       };
@@ -399,13 +458,14 @@ export async function POST(request: Request) {
       confidence: Math.min(generation.confidence, intentConfidence),
       requiresHuman: generation.requiresHuman,
       message,
+      isPolicyInquiry: isPolicyInquiry(message),
     });
 
     let answer = generation.answer;
 
     if (requiresHuman && intent === "HUMAN_SUPPORT") {
       answer = ESCALATION_MESSAGE;
-    } else if (requiresHuman && intent === "REFUND_POLICY") {
+    } else if (requiresHuman && intent === "REFUND_POLICY" && isActiveRefundRequest(message)) {
       answer =
         "For refund requests and disputes, I'll connect you with our team who can review your order details.\n\n" +
         ESCALATION_MESSAGE;
@@ -432,7 +492,7 @@ export async function POST(request: Request) {
         sessionId,
         role: "assistant",
         content: answer,
-        intent,
+        intent: effectiveIntent,
         metadata: { products, requiresHuman } as unknown as Prisma.InputJsonValue,
       },
     });
@@ -440,7 +500,7 @@ export async function POST(request: Request) {
     return NextResponse.json(
       {
         answer,
-        intent,
+        intent: effectiveIntent,
         products,
         requiresHuman,
         sessionId,

@@ -1,25 +1,26 @@
 import type { ChatIntent } from "./intent";
 import { isSocialMessage } from "./intent";
+import { isActiveRefundRequest } from "./policies";
 import type { ChatGenerationResult } from "./openai";
 
 const CONFIDENCE_THRESHOLD = 0.55;
 
-const ESCALATION_INTENTS: ChatIntent[] = [
-  "HUMAN_SUPPORT",
-  "REFUND_POLICY",
-];
+const ESCALATION_INTENTS: ChatIntent[] = ["HUMAN_SUPPORT"];
 
 export function shouldEscalate(params: {
   intent: ChatIntent;
   confidence: number;
   requiresHuman: boolean;
   message: string;
+  isPolicyInquiry?: boolean;
 }): boolean {
-  const { intent, confidence, requiresHuman, message } = params;
+  const { intent, confidence, requiresHuman, message, isPolicyInquiry: policyInquiry } = params;
 
   if (isSocialMessage(message)) return false;
+  if (policyInquiry) return false;
   if (requiresHuman) return true;
   if (ESCALATION_INTENTS.includes(intent)) return true;
+  if (intent === "REFUND_POLICY" && isActiveRefundRequest(message)) return true;
   if (confidence < CONFIDENCE_THRESHOLD) return true;
 
   if (/\b(custom\s*jewelry|payment\s*issue|chargeback|exception)\b/i.test(message)) {

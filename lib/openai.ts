@@ -120,11 +120,10 @@ Do NOT list product names, prices, or URLs when product cards are shown separate
 For order tracking, require verified order number + email/phone before sharing order details.
 Set requiresHuman: true for refund disputes or when you truly cannot answer from context.`;
 
-const SYSTEM_PROMPT_POLICY = `You are Valliani Jewelers' friendly AI shopping assistant answering a policy or store question.
-Use ONLY the retrieved policy context below. Answer in warm, natural language — not like a copy-pasted document.
-Directly address what the customer asked (e.g. financing, shipping, returns, store locations).
-Keep it concise (2-5 sentences) unless they ask for full details. Include key facts: timeframes, options, contact info when relevant.
-If the context doesn't cover their question, say so honestly and offer to connect them with the team.`;
+const SYSTEM_PROMPT_POLICY = `You are Valliani Jewelers' AI assistant answering a policy question.
+Use ONLY the retrieved policy context. Reply in 2-3 short sentences or 3-4 bullet points max.
+Cover only the essentials: timeframes, eligibility, and contact info if needed.
+Do NOT escalate or offer to connect with the team unless the customer is requesting a refund on a specific order.`;
 
 const SYSTEM_PROMPT_WITH_PRODUCTS = `You are Valliani Jewelers' AI assistant. Product cards are shown separately in the UI.
 Reply in 1-2 short sentences only. Do NOT enumerate products, prices, or links in text.

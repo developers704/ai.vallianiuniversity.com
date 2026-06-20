@@ -55,6 +55,30 @@ export function getPoliciesByIntent(intent: ChatIntent): PolicyDocument[] {
   return policies.filter((p) => p.types.some((t) => types.includes(t)));
 }
 
+const POLICY_INQUIRY_PATTERN =
+  /\b((what\s*(is|'s)\s*(your|the|a)?\s*)?(shipping|return|refund|exchange|warranty)\s*(policy|policies)|shipping\s*policy|return\s*policy|refund\s*policy|return\s*policy|exchange\s*policy|warranty\s*policy)\b/i;
+
+/** Customer asking what the policy is — not requesting action. */
+export function isPolicyInquiry(message: string): boolean {
+  const lower = normalizePolicyMessage(message);
+  if (POLICY_INQUIRY_PATTERN.test(lower)) return true;
+  if (/^(shipping|return|refund|exchange|warranty)\s*\??\s*$/i.test(lower)) return true;
+  return false;
+}
+
+/** Customer wants to start a refund/dispute — should escalate to human. */
+export function isActiveRefundRequest(message: string): boolean {
+  if (isPolicyInquiry(message)) return false;
+  const lower = normalizePolicyMessage(message);
+  return /\b(i\s+want\s+a\s+refund|need\s+a\s+refund|get\s+a\s+refund|request\s+a\s+refund|my\s+refund|where\s+is\s+my\s+refund|chargeback|dispute|charged\s+twice|money\s+back)\b/i.test(
+    lower
+  );
+}
+
+function normalizePolicyMessage(message: string): string {
+  return message.trim().replace(/^['"`]+|['"`]+$/g, "");
+}
+
 const FINANCING_MESSAGE_PATTERN =
   /\b(financ(e|ing)?|acima|affirm|authorize\.?net|pay\s*over\s*time|buy\s*now\s*pay\s*later|bnpl|monthly\s*payment|payment\s*plan)\b/i;
 
@@ -211,36 +235,47 @@ export function resolvePolicyIntentFromMessage(message: string): ChatIntent | nu
 const POLICY_SUMMARIES: Record<string, string> = {
   shipping: [
     "Shipping policy:",
-    "",
-    "Standard Shipping: Delivery Time: 5–7 business days.",
-    "Expedited Shipping: Delivery Time: 2–3 business days.",
-    "Free shipping across the United States.",
+    "• Free shipping across the U.S.",
+    "• Standard: 5–7 business days | Expedited: 2–3 business days",
+    "• Signature required; U.S. street addresses only (no P.O. boxes)",
+    "• Tracking email sent when your order ships",
   ].join("\n"),
   "returns-refunds": [
-    "Refund and exchange policy:",
-    "",
-    "You may return it within 30 days of receipt for a refund or exchange.",
-    "If you are not satisfied with your purchase, you may exchange it within a week of purchase.",
-    "Exchanges can be made by shipping the item back to us or visiting any of our local stores. Initial shipping is free; however, shipping charges may apply for exchanges.",
+    "Return & refund policy:",
+    "• 30-day returns for refund or exchange from date of receipt",
+    "• Exchange within 1 week — ship back or visit any store",
+    "• Items must be unworn, unaltered, with original packaging & documents",
+    "• Custom, sized, engraved, or used items are not eligible",
+    "• Questions: orders@vallianijewelers.com | 1-844-OVANI-104",
   ].join("\n"),
   financing: [
-    "Yes — Valliani Jewelers offers financing at checkout through trusted partners:",
-    "",
-    "• Acima — lease-to-own with flexible payment plans",
-    "• Affirm — buy now, pay later with transparent monthly payments",
-    "• Authorize.net — secure payment processing for online orders",
-    "",
-    "Select a financing option at checkout to see if you qualify. For help, call 1-844-OVANI-104 or email orders@vallianijewelers.com.",
+    "Yes — Valliani Jewelers offers financing at checkout:",
+    "• Acima — lease-to-own | Affirm — buy now, pay later",
+    "• Select a financing option at checkout to see if you qualify",
+    "• Help: 1-844-OVANI-104 or orders@vallianijewelers.com",
   ].join("\n"),
   "store-locations": [
-    "Valliani Jewelers has 30+ store locations across California, Nevada, Arizona, and Texas.",
-    "",
-    "Ask me about a specific city or mall — for example: \"store in Fresno\" or \"location near San Jose\" — and I'll share that address and phone number.",
-    "",
-    "General contact: orders@vallianijewelers.com | 1-844-OVANI-104",
-    "Full store list: vallianijewelers.com",
+    "Valliani Jewelers has 30+ stores across California, Nevada, Arizona, and Texas.",
+    "Ask about a specific city or mall for address & phone.",
+    "Contact: orders@vallianijewelers.com | 1-844-OVANI-104",
   ].join("\n"),
 };
+
+const REFUND_FOCUS_SUMMARY = [
+  "Refund policy:",
+  "• 30-day refund or exchange from date of receipt",
+  "• Item must be unworn, unaltered, with original packaging & certificates",
+  "• Custom, engraved, sized, or used items are not eligible",
+  "• To start a return: orders@vallianijewelers.com | 1-844-OVANI-104",
+].join("\n");
+
+const RETURN_FOCUS_SUMMARY = [
+  "Return policy:",
+  "• 30-day returns for refund or exchange",
+  "• Exchange within 1 week — mail back or visit any Valliani store",
+  "• Include all original packaging, gifts, and documents",
+  "• Custom or worn items cannot be returned",
+].join("\n");
 
 function wantsFullPolicyDetails(message: string): boolean {
   return /\b(full|complete|entire|all details|more details|tell me everything|whole policy|every detail)\b/i.test(
@@ -285,17 +320,29 @@ function selectPolicyForAnswer(
   return policies[0];
 }
 
-function summarizePolicy(policy: PolicyDocument, message: string): string {
+function summarizePolicy(
+  policy: PolicyDocument,
+  message: string,
+  resolvedIntent?: ChatIntent
+): string {
   if (wantsFullPolicyDetails(message)) {
     const revised = policy.lastRevised ? ` (Last Revised: ${policy.lastRevised})` : "";
     return `${policy.title}${revised}:\n\n${policy.content}`;
   }
 
+  const lower = message.toLowerCase();
+  if (/\brefund\b/i.test(lower) && resolvedIntent === "REFUND_POLICY") {
+    return REFUND_FOCUS_SUMMARY;
+  }
+  if (/\breturn\b/i.test(lower) && resolvedIntent === "RETURNS_POLICY") {
+    return RETURN_FOCUS_SUMMARY;
+  }
+
   const summary = POLICY_SUMMARIES[policy.id];
   if (summary) return summary;
 
-  const excerpt = policy.content.slice(0, 600).trim();
-  return `${policy.title}:\n\n${excerpt}${policy.content.length > 600 ? "..." : ""}`;
+  const excerpt = policy.content.slice(0, 400).trim();
+  return `${policy.title}:\n\n${excerpt}${policy.content.length > 400 ? "..." : ""}`;
 }
 
 const DIRECT_POLICY_INTENTS: ChatIntent[] = [
@@ -359,7 +406,7 @@ export function buildPolicyDirectAnswer(
   }
 
   const policy = selectPolicyForAnswer(policies, message, resolvedIntent);
-  return summarizePolicy(policy, message);
+  return summarizePolicy(policy, message, resolvedIntent);
 }
 
 function formatStorePolicyAnswer(
@@ -392,7 +439,7 @@ function formatStorePolicyAnswer(
     return `${storePolicy.title}:\n\n${storePolicy.content}`;
   }
 
-  return summarizePolicy(storePolicy, message);
+  return summarizePolicy(storePolicy, message, "STORE_INFO");
 }
 
 export function hasHardcodedPolicyForIntent(

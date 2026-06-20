@@ -10,6 +10,8 @@ import {
 import {
   parseSearchFilters,
   enrichProductSearchQuery,
+  productMatchesCategory,
+  productPassesStrictFilters,
   scoreProductMatch,
   type ProcessedProduct,
   type ProductSearchResult,
@@ -92,6 +94,7 @@ export function searchProductsLocal(
       ) {
         return false;
       }
+      if (!productPassesStrictFilters(product, query, mergedFilters)) return false;
       return score > 0 || query.length < 3;
     })
     .sort((a, b) => b.score - a.score)
@@ -180,8 +183,11 @@ export async function searchProductsHybrid(
   }
 
   const shopifyLive = await searchProductsShopifyLive(searchQuery, limit);
-  if (shopifyLive.length > 0) {
-    const merged = mergeProductResults(localResults, shopifyLive, limit);
+  const filteredShopifyLive = shopifyLive.filter((p) =>
+    productPassesStrictFilters(p, query, mergedFilters)
+  );
+  if (filteredShopifyLive.length > 0) {
+    const merged = mergeProductResults(localResults, filteredShopifyLive, limit);
     if (merged.length > 0) return merged;
   }
 
@@ -200,13 +206,7 @@ export async function searchProductsHybrid(
             return false;
           if (mergedFilters.minPrice !== undefined && p.price < mergedFilters.minPrice)
             return false;
-          if (
-            mergedFilters.category &&
-            !p.category?.toLowerCase().includes(mergedFilters.category.toLowerCase())
-          ) {
-            return false;
-          }
-          return true;
+          return productPassesStrictFilters(p, query, mergedFilters);
         })
         .map((p) => ({
           product: p,
@@ -253,11 +253,34 @@ export async function searchProductsHybrid(
               sku: p.sku,
               image: p.image,
               content: p.content,
+              metadata: p.metadata,
             },
             query,
             mergedFilters
           ),
         }))
+        .filter(({ product, score }) => {
+          if (score <= 0) return false;
+          return productPassesStrictFilters(
+            {
+              shopifyProductId: product.shopifyProductId,
+              title: product.title,
+              handle: product.handle,
+              url: product.url,
+              category: product.category,
+              tags: product.tags,
+              price: product.price,
+              currency: product.currency,
+              available: product.available,
+              sku: product.sku,
+              image: product.image,
+              content: product.content,
+              metadata: product.metadata,
+            },
+            query,
+            mergedFilters
+          );
+        })
         .sort((a, b) => b.score - a.score)
         .slice(0, limit);
 

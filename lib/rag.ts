@@ -34,11 +34,13 @@ const POLICY_TYPE_MAP: Partial<Record<ChatIntent, string>> = {
 
 export async function retrieveContext(params: {
   message: string;
+  searchMessage?: string;
   intent: ChatIntent;
   extractedSku?: string;
   orderContext?: string;
 }): Promise<RetrievalContext> {
   const { message, intent, extractedSku, orderContext } = params;
+  const searchMessage = params.searchMessage ?? message;
   let products: ProductSearchResult[] = [];
   let policyContext = "";
   let productContext = "";
@@ -58,7 +60,7 @@ export async function retrieveContext(params: {
       }
     }
     if (products.length === 0) {
-      products = await searchProductsHybrid(message, {}, 5);
+      products = await searchProductsHybrid(searchMessage, {}, 5);
     }
     productContext =
       intent === "PRODUCT_DETAILS"

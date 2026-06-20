@@ -29,7 +29,8 @@ export function isProductListIntent(intent: ChatIntent): boolean {
 /** Short answer when product cards carry the details — skips a full LLM completion. */
 export function buildProductListAnswer(
   products: ProductSearchResult[],
-  message: string
+  message: string,
+  isRefinement = false
 ): string {
   const count = products.length;
   const lower = message.toLowerCase();
@@ -45,7 +46,27 @@ export function buildProductListAnswer(
   else if (/watch/i.test(lower)) category = "watches";
   else if (/bracelet|bangle/i.test(lower)) category = "bracelets";
 
+  if (isRefinement) {
+    return `Here ${count === 1 ? "is" : "are"} ${count} ${category} that match what you asked for — updated with your latest preference. See the product cards below for photos, prices, and links.`;
+  }
+
   return `Here ${count === 1 ? "is" : "are"} ${count} ${category} from Valliani Jewelers. See the product cards below for photos, prices, and links. Tell me your budget, metal, or stone preference if you'd like me to narrow this down.`;
+}
+
+/** When strict search finds zero in-stock matches for what the customer asked. */
+export function buildNoProductsAnswer(message: string, searchMessage?: string): string {
+  const lower = (searchMessage ?? message).toLowerCase();
+  let label = "items matching your request";
+
+  if (/\bgold\b/i.test(lower) && /\bring/i.test(lower)) label = "gold rings currently in stock";
+  else if (/\bplatinum\b/i.test(lower) && /\bring/i.test(lower)) label = "platinum rings currently in stock";
+  else if (/\bdiamond/i.test(lower) && /\bring/i.test(lower)) label = "diamond rings currently in stock";
+  else if (/\bring/i.test(lower)) label = "rings matching your request in stock";
+  else if (/\bearring/i.test(lower)) label = "earrings matching your request in stock";
+  else if (/\bwatch/i.test(lower)) label = "watches matching your request in stock";
+  else if (/\bnecklace|pendant/i.test(lower)) label = "necklaces or pendants matching your request in stock";
+
+  return `I couldn't find any ${label} right now. Try a different budget, metal, or style — or tell me more about what you're looking for and I'll search again.`;
 }
 
 /** Trim policy text sent to the LLM when the full doc is long. */
